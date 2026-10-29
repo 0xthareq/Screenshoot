@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upload Screenshot</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --card: #fff; --text: #1c2333; --muted: #6b7489;
+    --primary: #2f6df6; --primary-d: #2459d1; --ok: #16a34a; --err: #dc2626; --border: #d9deea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1420; --card: #181f31; --text: #e7ebf5; --muted: #98a2bb; --border: #2b3550; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px 16px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .95rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+  .drop { border: 2px dashed var(--border); border-radius: 12px; padding: 36px 16px; text-align: center;
+    cursor: pointer; transition: .15s; }
+  .drop.over { border-color: var(--primary); background: rgba(47,109,246,.07); }
+  .drop strong { display: block; font-size: 1.05rem; margin-bottom: 6px; }
+  .drop span { color: var(--muted); font-size: .9rem; }
+  input[type=file] { display: none; }
+  .list { margin-top: 16px; display: grid; gap: 10px; }
+  .item { display: flex; gap: 12px; align-items: center; border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px; }
+  .item img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; flex: none; background: var(--bg); }
+  .meta { flex: 1; min-width: 0; }
+  .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { font-size: .85rem; color: var(--muted); margin-top: 2px; word-break: break-all; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); }
+  .status a { color: var(--primary); }
+  .rm { background: none; border: 0; color: var(--muted); font-size: 1.2rem; cursor: pointer; padding: 4px 8px; }
+  .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  button.btn { background: var(--primary); color: #fff; border: 0; padding: 11px 20px; border-radius: 10px;
+    font-size: 1rem; cursor: pointer; font-weight: 600; }
+  button.btn:hover { background: var(--primary-d); }
+  button.btn:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.ghost:hover { background: var(--bg); }
+  .hint { margin-top: 14px; font-size: .85rem; color: var(--muted); }
+  kbd { border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; font-size: .8rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Upload Screenshot</h1>
+  <p class="sub">Gambar disimpan ke Google Drive, link dan tanggal upload otomatis tercatat di Spreadsheet.</p>
+
+  <div class="card">
+    <div class="drop" id="drop">
+      <strong>Klik, drag &amp; drop, atau paste gambar di sini</strong>
+      <span>PNG / JPG / WEBP, maksimal 10 MB per gambar</span>
+    </div>
+    <input type="file" id="file" accept="image/*" multiple>
+
+    <div class="list" id="list"></div>
+
+    <div class="actions">
+      <button class="btn" id="send" disabled>Upload</button>
+      <button class="btn ghost" id="clear" disabled>Bersihkan</button>
+    </div>
+    <label class="hint" style="display:block">
+      <input type="checkbox" id="auto" checked> Upload otomatis saat paste
+    </label>
+    <p class="hint">Tips: tekan <kbd>Win</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> untuk screenshot, lalu <kbd>Ctrl</kbd> + <kbd>V</kbd> di halaman ini. Langsung terupload.</p>
+  </div>
+</div>
+
+<script>
+  // ====== ISI DI SINI ======
+  const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyD3R5z8tS0_fRngtnN7mIKOgFmgqJZGUV_CIPiK3d1mk1vbntR6DM-Y3f31bppxAqOVQ/exec'; // URL hasil Deploy, berakhiran /exec
+  const SECRET = '';                                      // samakan dengan SECRET di Code.gs (boleh kosong)
+  // =========================
+
+  const MAX_BYTES = 10 * 1024 * 1024;
+  const drop = document.getElementById('drop');
+  const fileInput = document.getElementById('file');
+  const list = document.getElementById('list');
+  const sendBtn = document.getElementById('send');
+  const clearBtn = document.getElementById('clear');
+
+  let items = []; // {id, file, el, status: 'ready'|'uploading'|'done'|'error'}
+  let uid = 0;
+
+  drop.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+  document.addEventListener('paste', e => {
+    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+    if (files.length) {
+      addFiles(files);
+      if (document.getElementById('auto').checked) startUpload();
+    }
+  });
+
+  function addFiles(fileList) {
+    for (const file of fileList) {
+      if (!file.type.startsWith('image/')) continue;
+      const id = ++uid;
+      const el = document.createElement('div');
+      el.className = 'item';
+      const url = URL.createObjectURL(file);
+      const name = file.name && file.name !== 'image.png' ? file.name : 'screenshot-' + Date.now() + '.png';
+      el.innerHTML = `
+        <img src="${url}" alt="">
+        <div class="meta"><div class="name"></div><div class="status"></div></div>
+        <button class="rm" title="Hapus">&times;</button>`;
+      el.querySelector('.name').textContent = name;
+      const item = { id, file, name, el, status: 'ready' };
+      if (file.size > MAX_BYTES) { item.status = 'error'; setStatus(item, 'Ukuran lebih dari 10 MB', 'err'); }
+      else setStatus(item, (file.size / 1024).toFixed(0) + ' KB, siap diupload');
+      el.querySelector('.rm').onclick = () => { items = items.filter(i => i.id !== id); el.remove(); refresh(); };
+      items.push(item);
+      list.appendChild(el);
+    }
+    refresh();
+  }
+
+  function setStatus(item, html, cls = '') {
+    const s = item.el.querySelector('.status');
+    s.className = 'status ' + cls;
+    s.innerHTML = html;
+  }
+
+  function refresh() {
+    const pending = items.some(i => i.status === 'ready');
+    sendBtn.disabled = !pending;
+    clearBtn.disabled = items.length === 0;
+  }
+
+  function toBase64(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(',')[1]);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+  }
+
+  async function uploadOne(item) {
+    item.status = 'uploading';
+    setStatus(item, 'Mengupload...');
+    try {
+      const data = await toBase64(item.file);
+      // text/plain supaya tidak kena preflight CORS di Apps Script
+      const res = await fetch(APPS_SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ filename: item.name, mimeType: item.file.type, data, secret: SECRET })
+      });
+      const out = await res.json();
+      if (!out.ok) throw new Error(out.error || 'Gagal upload');
+      item.status = 'done';
+      setStatus(item, `Berhasil. <a href="${out.link}" target="_blank" rel="noopener">Buka di Drive</a>`, 'ok');
+      item.el.querySelector('.rm').remove();
+    } catch (err) {
+      item.status = 'ready';
+      setStatus(item, 'Gagal: ' + err.message + ' (coba upload lagi)', 'err');
+    }
+  }
+
+  let busy = false;
+  async function startUpload() {
+    if (busy) return;
+    if (APPS_SCRIPT_URL.startsWith('ISI_')) { alert('Isi dulu APPS_SCRIPT_URL di index.html'); return; }
+    busy = true;
+    sendBtn.disabled = true; clearBtn.disabled = true;
+    // loop sampai tidak ada lagi yang siap (menangani paste baru saat upload berjalan)
+    let next;
+    while ((next = items.find(i => i.status === 'ready'))) {
+      await uploadOne(next);
+      if (next.status === 'ready') break; // gagal, berhenti supaya tidak looping terus
+    }
+    busy = false;
+    refresh();
+  }
+  sendBtn.addEventListener('click', startUpload);
+
+  clearBtn.addEventListener('click', () => {
+    items = items.filter(i => i.status === 'uploading');
+    list.innerHTML = '';
+    items.forEach(i => list.appendChild(i.el));
+    refresh();
+  });
+</script>
+</body>
+</html>
